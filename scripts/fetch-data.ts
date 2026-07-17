@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
-import { getCard, getLiveRoom, getGuardCount, getDynamics } from "../lib/bilibili";
+import { getCard, getLiveRoom, getGuardCount } from "../lib/bilibili";
+import { fetchDynamicsViaBrowser } from "./fetch-dynamics-playwright";
 
 const DATA_DIR = path.join(process.cwd(), "public", "data");
 
@@ -8,6 +9,48 @@ function parseDuration(seconds: number) {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
   return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function parseDynamics(items: any[]) {
+  return items.slice(0, 10).map((it: any) => {
+    const author = it.modules?.module_author || {};
+    const dynamic = it.modules?.module_dynamic || {};
+    const major = dynamic.major || {};
+    const base = {
+      id: it.id_str,
+      type: it.type,
+      author: author.name,
+      avatar: author.avatar,
+      pubTime: author.pub_time,
+      pubTs: author.pub_ts,
+      link: `https://t.bilibili.com/${it.id_str}`,
+    };
+    if (it.type === "DYNAMIC_TYPE_AV" && major.archive) {
+      const arc = major.archive;
+      return {
+        ...base,
+        content: arc.title,
+        cover: arc.cover,
+        bvid: arc.bvid,
+        duration: parseDuration(arc.duration),
+        play: arc.stat?.play,
+        danmaku: arc.stat?.danmaku,
+        link: `https://www.bilibili.com/video/${arc.bvid}`,
+      };
+    }
+    if (it.type === "DYNAMIC_TYPE_DRAW" && major.draw) {
+      return {
+        ...base,
+        content: dynamic.desc?.text || "",
+        images: major.draw.items.map((img: any) => img.src),
+      };
+    }
+    return {
+      ...base,
+      content: dynamic.desc?.text || "",
+      cover: major.opus?.pics?.[0]?.url || null,
+    };
+  });
 }
 
 async function main() {
@@ -39,55 +82,23 @@ async function main() {
     guards,
   };
 
-  const dyn = await getDynamics();
   let dynamics: any[] = [];
-  if (dyn?.code === 0) {
-    dynamics = dyn?.data?.items?.slice(0, 10).map((it: any) => {
-      const author = it.modules?.module_author || {};
-      const dynamic = it.modules?.module_dynamic || {};
-      const major = dynamic.major || {};
-      const base = {
-        id: it.id_str,
-        type: it.type,
-        author: author.name,
-        avatar: author.avatar,
-        pubTime: author.pub_time,
-        pubTs: author.pub_ts,
-        link: `https://t.bilibili.com/${it.id_str}`,
-      };
-      if (it.type === "DYNAMIC_TYPE_AV" && major.archive) {
-        const arc = major.archive;
-        return {
-          ...base,
-          content: arc.title,
-          cover: arc.cover,
-          bvid: arc.bvid,
-          duration: parseDuration(arc.duration),
-          play: arc.stat?.play,
-          danmaku: arc.stat?.danmaku,
-          link: `https://www.bilibili.com/video/${arc.bvid}`,
-        };
-      }
-      if (it.type === "DYNAMIC_TYPE_DRAW" && major.draw) {
-        return {
-          ...base,
-          content: dynamic.desc?.text || "",
-          images: major.draw.items.map((img: any) => img.src),
-        };
-      }
-      return {
-        ...base,
-        content: dynamic.desc?.text || "",
-        cover: major.opus?.pics?.[0]?.url || null,
-      };
-    }) || [];
+  let dynCode = -1;
+  try {
+    const dyn = await fetchDynamicsViaBrowser();
+    dynCode = dyn?.code ?? -1;
+    if (dynCode === 0) {
+      dynamics = parseDynamics(dyn?.data?.items || []);
+    }
+  } catch (e: any) {
+    console.error("Browser dynamics fetch failed:", e.message);
   }
 
   fs.mkdirSync(DATA_DIR, { recursive: true });
   fs.writeFileSync(path.join(DATA_DIR, "status.json"), JSON.stringify(status));
   fs.writeFileSync(
     path.join(DATA_DIR, "dynamics.json"),
-    JSON.stringify({ code: dyn?.code ?? -1, items: dynamics })
+    JSON.stringify({ code: dynCode, items: dynamics })
   );
   console.log("Fetched", new Date().toISOString(), "live", status.live.status, "dynamics", dynamics.length);
 }
