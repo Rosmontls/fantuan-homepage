@@ -3,12 +3,24 @@ const MID = "545530293";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 
+function randomHex(len: number) {
+  const chars = "0123456789abcdef";
+  let s = "";
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * 16)];
+  return s;
+}
+
+function randomLSID() {
+  return `${randomHex(8).toUpperCase()}_${randomHex(8).toUpperCase()}`;
+}
+
 async function fetchJson(url: string, init?: RequestInit) {
   const res = await fetch(url, {
     ...init,
     headers: {
       "User-Agent": UA,
       Accept: "application/json, text/plain, */*",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
       ...init?.headers,
     },
   });
@@ -40,7 +52,6 @@ export async function getLiveRoom() {
     });
     const liveTimeStr = info?.data?.live_time;
     if (liveTimeStr) {
-      // B站 live_time 是北京时间（+08:00），需要按 +8 解析
       const iso = liveTimeStr.replace(" ", "T") + "+08:00";
       const ts = new Date(iso).getTime();
       if (!isNaN(ts)) liveTimeSec = Math.floor(ts / 1000);
@@ -68,30 +79,44 @@ export async function getGuardCount(roomId: string | number) {
 }
 
 async function getBiliCookies() {
-  const res = await fetch(`https://space.bilibili.com/${MID}`, {
+  // 1. 获取 buvid3 / buvid4
+  const finger = await fetchJson("https://api.bilibili.com/x/frontend/finger/spi", {
+    headers: {
+      Referer: "https://www.bilibili.com",
+      Origin: "https://www.bilibili.com",
+    },
+  });
+
+  // 2. 访问主页拿 b_nut
+  const home = await fetch("https://www.bilibili.com", {
     headers: {
       "User-Agent": UA,
       Referer: "https://www.bilibili.com",
     },
   });
-  const setCookie = res.headers.getSetCookie?.() || res.headers.get("set-cookie")?.split(", ") || [];
+  const setCookie = home.headers.getSetCookie?.() || home.headers.get("set-cookie")?.split(", ") || [];
   const cookies: Record<string, string> = {};
   for (const c of setCookie) {
     const [kv] = c.split(";");
     const [k, v] = kv.trim().split("=");
     if (k && v) cookies[k] = v;
   }
+
+  if (finger?.data?.b_3) cookies.buvid3 = finger.data.b_3;
+  if (finger?.data?.b_4) cookies.buvid4 = finger.data.b_4;
+  cookies.b_lsid = randomLSID();
+
   return cookies;
 }
 
 async function fetchDynamicsWithCookies(cookies: Record<string, string>) {
   const parts = [
     cookies.buvid3 && `buvid3=${cookies.buvid3}`,
+    cookies.buvid4 && `buvid4=${cookies.buvid4}`,
     cookies.b_nut && `b_nut=${cookies.b_nut}`,
-    cookies.__at_once && `__at_once=${cookies.__at_once}`,
+    cookies.b_lsid && `b_lsid=${cookies.b_lsid}`,
   ].filter(Boolean);
 
-  // 必须带上 dm_img 系列参数，否则会被风控 -352 / request banned
   const params = new URLSearchParams({
     host_mid: MID,
     offset: "",
@@ -111,6 +136,13 @@ async function fetchDynamicsWithCookies(cookies: Record<string, string>) {
       headers: {
         Referer: `https://space.bilibili.com/${MID}`,
         Origin: "https://space.bilibili.com",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "sec-ch-ua": '"Not/A)Brand";v="8", "Chromium";v="126", "Google Chrome";v="126"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "empty",
+        "sec-fetch-mode": "cors",
+        "sec-fetch-site": "same-site",
         Cookie: parts.join("; "),
       },
     }
@@ -120,7 +152,7 @@ async function fetchDynamicsWithCookies(cookies: Record<string, string>) {
 export async function getDynamics() {
   const cookies = await getBiliCookies();
   const data = await fetchDynamicsWithCookies(cookies);
-  if (data?.code === -352) {
+  if (data?.code === -352 || data?.code === -412) {
     const fresh = await getBiliCookies();
     return fetchDynamicsWithCookies(fresh);
   }
